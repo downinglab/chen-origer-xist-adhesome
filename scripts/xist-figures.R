@@ -150,7 +150,7 @@ write.csv(top20_clean,
           row.names = FALSE)
 
 # Import saved GSEA results
-up_X7_GOBP <- read.csv("~/chen-origer-xist-adhesome/data/fig1d-GOBP-upDEG-X9.csv") %>%
+up_X7_GOBP <- read.csv("~/chen-origer-xist-adhesome/data/fig1d-GOBP-upDEG-X7.csv") %>%
   dplyr::mutate(category = "up_X7")
 up_X9_GOBP <- read.csv("~/chen-origer-xist-adhesome/data/fig1d-GOBP-upDEG-X9.csv") %>%
   dplyr::mutate(category = "up_X9")
@@ -170,13 +170,13 @@ res_GOBP <- res_GOBP %>%
 
 # Create dot plot
 ggplot(res_GOBP, 
-       aes(x = neg_log_p, 
-           y = tidytext::reorder_within(term_name, neg_log_p, category), 
+       aes(x = recall, 
+           y = tidytext::reorder_within(term_name, recall, category), 
            color = neg_log_p, 
            size = intersection_size)) +
   geom_point(alpha = 0.8) +
   scale_size_continuous(name = "Gene Count") +
-  scale_color_gradient(low = "#fee5d9", high = "#cb181d") +
+  scale_color_gradient(low = "#f0907b", high = "#cb181d") +
   tidytext::scale_y_reordered() +
   theme_minimal(base_size = 14) +
   labs(title = NULL,
