@@ -681,10 +681,10 @@ adhesome_cor <- WGCNA::bicor(t(adhesome_matrix), xist_vector,
 # Store median adhesome correlation for later plotting
 observed_median <- median(adhesome_cor, na.rm=TRUE)
 
-# Define background genes (not adhesome or XIST)
+# Define background genes (not XIST)
 # Any gene location
 background_genes <- setdiff(rownames(expr_matrix),
-                            c(adhesome_genes, "XIST"))
+                            c("XIST"))
 
 # Only X-linked genes
 library(biomaRt)
