@@ -641,115 +641,128 @@ ggplot(filter(rbind(gtex,tcga), tissue %in% (gtex$tissue[gtex$tissue %in% tcga$t
 
 
 # Supp Figure 2c/d --------------------------------------------------------
-# XIST correlation with other gene sets
-library(ggplot2)
+# Adhesome dysregulation during XIST knockdown
+
+library(patchwork)
 library(tidyverse)
-library(WGCNA)
 
-set.seed(123)
-
-# See "GTEx Data Preparation" for generating expression matrices
-gtex <- readRDS("~/chen-origer-xist-adhesome/data/gtex-gene-tpm-female.rds")
+# Get DESeq2 results from PMID:39546568 Dataset S01
+res_X7 <- read.csv("~/chen-origer-xist-adhesome/data/deseq-res-X7.csv")
+res_X9 <- read.csv("~/chen-origer-xist-adhesome/data/deseq-res-X9.csv")
 
 # Import adhesome gene data
 adhesome <- read.csv("~/chen-origer-xist-adhesome/data/adhesome-components.csv")
 
-# Convert dataset to numeric matrix
-expr_matrix <- as.matrix(gtex[ , -1])
-rownames(expr_matrix) <- gtex$Description
-
-# Replace zeros with NA
-expr_matrix[expr_matrix == 0] <- NA
-
-# Extract XIST expression
-xist_vector <- expr_matrix["XIST", ]
-
-# Define adhesome gene set
-adhesome_genes <- intersect(adhesome$gene,
-                            rownames(expr_matrix))
-
-# Get adhesome gene expression matrix
-adhesome_matrix <- expr_matrix[adhesome_genes, ]
-
-# Remove zero variance genes
-adhesome_matrix <- adhesome_matrix[apply(adhesome_matrix, 1, var, na.rm=TRUE) > 0, ]
-
-# Compute correlations in one shot
-adhesome_cor <- WGCNA::bicor(t(adhesome_matrix), xist_vector,
-                             use = "pairwise.complete.obs")
-
-# Store median adhesome correlation for later plotting
-observed_median <- median(adhesome_cor, na.rm=TRUE)
-
-# Define background genes (not XIST)
-# Any gene location
-background_genes <- setdiff(rownames(expr_matrix),
-                            c("XIST"))
-
-# Only X-linked genes
-library(biomaRt)
-ensembl <- biomaRt::useMart("ensembl", 
-                            dataset = "hsapiens_gene_ensembl")
-gene_locations <- biomaRt::getBM(attributes = c("hgnc_symbol", 
-                                                "chromosome_name"),
-                                 filters = "hgnc_symbol",
-                                 values = background_genes,
-                                 mart = ensembl)
-background_x_genes <- gene_locations %>% 
-  dplyr::filter(chromosome_name == "X") %>%
-  dplyr::pull(hgnc_symbol)
-
-# Define number of permutations and empty vector
-n_perm <- 2000
-null_medians <- numeric(n_perm)
-
-# Run permutations
-for (i in 1:n_perm) {
+# Function for expression-matched permutation
+run_xist_permutation <- function(res_df, label_name, seed = 42) {
+  set.seed(seed)
   
-  random_genes <- sample(background_genes, length(adhesome_genes))
+  # Clean the input data and calculate baseline log2 expression
+  clean_df <- res_df %>%
+    filter(!is.na(gene), !is.na(baseMean), !is.na(log2FoldChange)) %>%
+    mutate(log2_baseline = log2(baseMean + 1)) %>%
+    mutate(group = ifelse(gene %in% adhesome$gene, "Adhesome", "Global Background"))
   
-  random_matrix <- expr_matrix[random_genes, ]
+  # Define the exact adhesome genes present in this dataset
+  adhesome_present <- clean_df %>% filter(group == "Adhesome")
+  background_pool <- clean_df %>% filter(group == "Global Background")
   
-  random_matrix <- random_matrix[
-    apply(random_matrix, 1, var, na.rm=TRUE) > 0, ]
+  message("\n--- Running Permutations for ", label_name, " ---")
+  message("Adhesome genes analyzed: ", nrow(adhesome_present))
+  message("Background genes available: ", nrow(background_pool))
   
-  random_cor <- bicor(t(random_matrix), xist_vector,
-                      use = "pairwise.complete.obs")
+  # Divide the genome into 5 expression bins based on baseline expression
+  quant_breaks <- quantile(clean_df$log2_baseline, probs = seq(0, 1, 0.2), na.rm = TRUE)
+  unique_breaks <- unique(quant_breaks)
   
-  null_medians[i] <- median(random_cor, na.rm=TRUE)
+  clean_df$quintile <- cut(
+    clean_df$log2_baseline, 
+    breaks = unique_breaks, 
+    include.lowest = TRUE, 
+    labels = FALSE
+  )
+  
+  # Re-split with the newly added quintile column
+  adhesome_mapped <- clean_df %>% filter(group == "Adhesome")
+  background_mapped <- clean_df %>% filter(group == "Global Background")
+  
+  
+  # Map how many adhesome genes land in each quintile
+  adhesome_bin_counts <- table(adhesome_mapped$quintile)
+  background_by_bin <- split(background_mapped$gene, background_mapped$quintile)
+  
+  # Run the 2,000-iteration permutation loop
+  n_perm <- 2000
+  perm_results <- replicate(n_perm, {
+    # Sample background genes matching the exact baseline profile of the adhesome
+    sampled_genes <- lapply(names(adhesome_bin_counts), function(bin_num) {
+      bin_pool <- background_by_bin[[bin_num]]
+      sample(bin_pool, size = adhesome_bin_counts[bin_num], replace = FALSE)
+    })
+    random_gene_set <- unlist(sampled_genes)
+    
+    # Subset results for these sampled background genes
+    random_subset <- clean_df %>% filter(gene %in% random_gene_set)
+    
+    c(
+      mean_lfc = mean(random_subset$log2FoldChange, na.rm = TRUE),
+      mean_abs_lfc = mean(abs(random_subset$log2FoldChange), na.rm = TRUE)
+    )
+  })
+  
+  perm_df <- as.data.frame(t(perm_results))
+  
+  # Calculate observed statistics for the real adhesome
+  obs_mean_abs_lfc <- mean(abs(adhesome_mapped$log2FoldChange), na.rm = TRUE)
+  
+  # Calculate Empirical P-Values
+  # Check our hypothesis that direct targets go UP (positive LFC)
+  p_val_volatility <- (1 + sum(perm_df$mean_abs_lfc >= obs_mean_abs_lfc)) / (1 + n_perm)
+  
+  # Print stats to console
+  message("Observed Adhesome Mean |LFC|: ", round(obs_mean_abs_lfc, 4))
+  message("Observed Adhesome Median |LFC|: ", round(median(abs(adhesome_mapped$log2FoldChange)), 4))
+  message("Adhesome genes with |LFC| > 2: ", sum(abs(adhesome_mapped$log2FoldChange) > 2.0))
+  message("Matched Background Mean |LFC|: ", round(mean(perm_df$mean_abs_lfc), 4))
+  message("Volatility Empirical p-value: ", round(p_val_volatility, 4))
+  
+  # Generate Plots
+  p1 <- ggplot(perm_df, aes(x = mean_abs_lfc)) +
+    geom_density(fill = "gray95", color = "slategray", linewidth = 0.8) +
+    geom_vline(xintercept = obs_mean_abs_lfc, color = "darkred", linetype = "dashed", linewidth = 1) +
+    annotate("text", x = obs_mean_abs_lfc, y = Inf, 
+             label = paste0("Adhesome (|LFC| = ", round(obs_mean_abs_lfc, 3), ")"), 
+             color = "darkred", fontface = "bold", size = 2.5, vjust = 1.5, hjust = 1.1) +
+    theme_classic() +
+    coord_cartesian(clip = "off") +
+    theme(plot.title = element_text(size = 9, face = "bold"),
+          axis.title = element_text(size = 8),
+          axis.text = element_text(size = 7)) +
+    labs(title = paste(label_name),
+         x = "Mean Absolute Log2 Fold Change", y = "Density")
+  
+  return(list(plot = p1, p_val = p_val_volatility))
 }
 
-# Empirical p-value
-empirical_p <- mean(null_medians >= observed_median) #fraction of sets where random median ≥ observed
+# Run permutation test on X7
+results_X7 <- run_xist_permutation(res_X7, "X7")
+results_X7$plot
 
-# Only empirical p % of random sets were as extreme as your observed
-message("Adhesome median: ", observed_median)
-message("Empirical p-value: ", empirical_p)
+# Run permutation test on X9
+results_X9 <- run_xist_permutation(res_X9, "X9")
+results_X9$plot
 
-# Optional: adjust empirical p-value if zero
-n_perm <- length(null_medians)
-empirical_p <- (1 + sum(null_medians >= observed_median)) / (1 + n_perm)
+# Combine the plots (X7 vs X9)
+combined_volatility_plot <- results_X7$plot + results_X9$plot +
+  plot_annotation(
+    title = "XIST Knockout DEG Results",
+    subtitle = "Comparing Adhesome Absolute |Log2 Fold Change| to Expression-Matched Background Genes",
+    theme = theme(plot.title = element_text(face="bold", size=12),
+                  plot.subtitle = element_text(face="italic", size=10))
+  )
 
-# Plot
-ggplot(data.frame(null_medians = null_medians,
-                  study = rep("GTEx", length(null_medians))), 
-       aes(x = null_medians, fill = study)) + 
-  geom_density(color = "black") +
-  scale_fill_manual(values = c("GTEx" = "#66A182")) +
-  theme_classic() +
-  theme(panel.spacing = unit(0.1, "lines"),
-        plot.title = element_text(size = 7, hjust = 0.5, face = "plain"),
-        plot.subtitle = element_text(size = 7, hjust = 0.5, face = "plain"),
-        legend.position = "none",
-        axis.title = element_text(size = 7),
-        axis.text.x = element_text(angle = 0, hjust = 0.5),
-        axis.text = element_text(size = 7, color = "black"),
-        axis.line = element_line(color = 'black', linewidth = 0.75),
-        axis.ticks = element_line(colour = "black", linewidth = 0.75),
-        strip.text.x = element_text(size = 7)) +
-  labs(title = NULL, x = "XIST-random gene set correlations in GTEx", y = "Frequency") +
-  geom_vline(xintercept = observed_median,
-             color = "black", linetype = "dashed", linewidth = 0.75)
+# Render the plots
+print(combined_volatility_plot)
 
 # Supp Figure 3a/b --------------------------------------------------------
 # lncRNA-adhesome correlation ridgeplots
